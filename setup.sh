@@ -21,22 +21,27 @@ echo "✓ Created engine directory: $ENGINE_DIR"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 echo "✓ Project directory: $SCRIPT_DIR"
 
-# Build Docker image
+# Check if image already exists
 echo ""
-echo "Building Docker image..."
 IMAGE_TAG="nanoowl-recycle-demo:latest"
 
-docker build \
-    --tag "$IMAGE_TAG" \
-    --progress=plain \
-    "$SCRIPT_DIR"
-
-if [ $? -eq 0 ]; then
-    echo ""
-    echo "✓ Image built successfully: $IMAGE_TAG"
+if docker image inspect "$IMAGE_TAG" &>/dev/null; then
+    echo "✓ Docker image already exists: $IMAGE_TAG"
 else
-    echo "✗ Image build failed"
-    exit 1
+    echo "Building Docker image..."
+    docker build \
+        --network host \
+        --tag "$IMAGE_TAG" \
+        --progress=plain \
+        "$SCRIPT_DIR"
+
+    if [ $? -eq 0 ]; then
+        echo ""
+        echo "✓ Image built successfully: $IMAGE_TAG"
+    else
+        echo "✗ Image build failed"
+        exit 1
+    fi
 fi
 
 # Create a temporary container to build TensorRT engines
@@ -53,11 +58,15 @@ docker run --rm \
     --entrypoint python3 \
     "$IMAGE_TAG" \
     -c "
-from nanoowl.predictor import OwlPredictor
+import sys
+sys.path.insert(0, '/opt/nanoowl')
+from nanoowl.owl_predictor import OwlPredictor
 import os
+import torch
 os.chdir('/engines')
 print('Initializing OWL predictor with TensorRT engine building...')
-predictor = OwlPredictor(model_name='google/owlvit-base-patch32', device='cuda')
+print('CUDA available:', torch.cuda.is_available())
+predictor = OwlPredictor(model_name='google/owlvit-base-patch32', device='cuda' if torch.cuda.is_available() else 'cpu')
 print('✓ TensorRT engines built and cached in /engines')
 "
 
