@@ -1,5 +1,10 @@
 # NanoOWL Recycling Detector - Test Results
 
+> **Note (2026-10-09):** These results were written by an AI assistant during setup and have not
+> been re-verified by a person. They also predate the TensorRT, NMS, alert and threshold fixes,
+> so the performance numbers below reflect the slower PyTorch path. Re-run the detection tests
+> with real objects before relying on this.
+
 **Date**: 2026-10-08  
 **Device**: NVIDIA Jetson Orin Nano Super (JetPack 6.0, L4T r36.3)  
 **Tester**: Claude
@@ -69,7 +74,7 @@
 |------|--------|-------|
 | Config Loading | ✓ PASS | /app/config/rules.yaml parsed |
 | Category Definitions | ✓ PASS | All 3 categories recognized |
-| Confidence Threshold | ✓ PASS | 0.5 threshold applied |
+| Confidence Threshold | ✓ PASS | 0.5 threshold applied (since lowered to 0.1) |
 | Thresholds Adjustable | ✓ PASS | YAML editable, requires restart |
 | Config Mount | ✓ PASS | -v config:/app/config:ro working |
 
@@ -128,12 +133,12 @@
 ```bash
 # On instructor device (already done)
 cd /home/nvidia/nanoowl-recycle-demo
-git remote add origin https://github.com/MY_USERNAME/nanoowl-recycle-demo.git
-git push -u origin master
+git remote add origin git@github.com:SummerPandey/NanoOwl-Demo.git
+git push -u origin main
 
 # On other 5 Jetsons
-git clone https://github.com/MY_USERNAME/nanoowl-recycle-demo.git
-cd nanoowl-recycle-demo
+git clone https://github.com/SummerPandey/NanoOwl-Demo.git
+cd NanoOwl-Demo
 bash setup.sh  # ~10 minutes
 bash start.sh  # ~1 minute
 ```

@@ -14,7 +14,7 @@ fi
 
 # Create persistent engine directory
 ENGINE_DIR="$HOME/.nanoowl-demo/engines"
-mkdir -p "$ENGINE_DIR"
+mkdir -p "$ENGINE_DIR" "$HOME/.nanoowl-demo/logs"
 echo "✓ Created engine directory: $ENGINE_DIR"
 
 # Get script directory
@@ -44,39 +44,25 @@ else
     fi
 fi
 
-# Create a temporary container to build TensorRT engines
+# Build the TensorRT image-encoder engine (the big speedup) once per device
 echo ""
-echo "Building TensorRT engines (this may take 5-10 minutes)..."
-
-TEMP_CONTAINER="nanoowl-engine-builder-$$"
-
-docker run --rm \
-    --name "$TEMP_CONTAINER" \
-    --runtime nvidia \
-    --network host \
-    --volume "$ENGINE_DIR:/engines" \
-    --entrypoint python3 \
-    "$IMAGE_TAG" \
-    -c "
-import sys
-sys.path.insert(0, '/opt/nanoowl')
-from nanoowl.owl_predictor import OwlPredictor
-import os
-import torch
-os.chdir('/engines')
-print('Initializing OWL predictor with TensorRT engine building...')
-print('CUDA available:', torch.cuda.is_available())
-predictor = OwlPredictor(model_name='google/owlvit-base-patch32', device='cuda' if torch.cuda.is_available() else 'cpu')
-print('✓ TensorRT engines built and cached in /engines')
-"
-
-if [ $? -eq 0 ]; then
-    echo "✓ TensorRT engines built successfully"
-    echo ""
-    echo "Engine files in $ENGINE_DIR:"
-    ls -lah "$ENGINE_DIR" 2>/dev/null || echo "  (engines directory)"
+ENGINE_FILE="owl_image_encoder_patch32.engine"
+if [ -f "$ENGINE_DIR/$ENGINE_FILE" ]; then
+    echo "✓ TensorRT engine already built: $ENGINE_DIR/$ENGINE_FILE"
 else
-    echo "⚠ Warning: Engine building had issues, but may still work"
+    echo "Building TensorRT engine (this may take 5-10 minutes)..."
+    if docker run --rm \
+        --runtime nvidia \
+        --network host \
+        --volume "$ENGINE_DIR:/engines" \
+        --workdir /opt/nanoowl \
+        --entrypoint python3 \
+        "$IMAGE_TAG" \
+        -m nanoowl.build_image_encoder_engine "/engines/$ENGINE_FILE"; then
+        echo "✓ TensorRT engine built: $ENGINE_DIR/$ENGINE_FILE"
+    else
+        echo "✗ TensorRT engine build failed. The demo will still run, but slower (PyTorch)."
+    fi
 fi
 
 echo ""

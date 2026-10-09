@@ -2,8 +2,10 @@
 # Defines object detection thresholds and category mappings
 
 detection:
-  # Confidence threshold for showing detections
-  confidence_threshold: 0.5
+  # Confidence threshold for showing detections.
+  # OWL-ViT scores run low (~0.1-0.3 for good matches), so start around 0.1.
+  # Raise it if you see false boxes, lower it if real items are missed.
+  confidence_threshold: 0.1
 
   # Duplicate box suppression (NMS)
   nms_threshold: 0.4
@@ -45,7 +47,8 @@ categories:
 
 # Alert settings
 alerts:
-  # Play alert sound when non-recyclable item detected
+  # Beep in the dashboard when a landfill item is detected
+  # (click the dashboard page once so the browser allows sound)
   sound_enabled: true
 
   # Alert duration (seconds) - how long to show alert after object removed
@@ -54,11 +57,11 @@ alerts:
   # Show overlay indicators
   overlay_enabled: true
 
-  # Log detections to file
+  # Log detections to ~/.nanoowl-demo/logs/detections.log
   log_enabled: true
 
 dashboard:
-  # MJPEG stream port
+  # Dashboard / MJPEG stream port
   port: 7860
 
   # Refresh rate (FPS)

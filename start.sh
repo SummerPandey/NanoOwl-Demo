@@ -30,7 +30,7 @@ if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
 fi
 
 # Ensure engine directory exists
-mkdir -p "$ENGINE_DIR"
+mkdir -p "$ENGINE_DIR" "$HOME/.nanoowl-demo/logs"
 
 # Run container
 echo "Starting container..."
@@ -40,6 +40,7 @@ docker run --detach \
     --device /dev/video0 \
     --network host \
     --volume "$ENGINE_DIR:/app/engines" \
+    --volume "$HOME/.nanoowl-demo/logs:/app/logs" \
     --volume "$SCRIPT_DIR/config:/app/config:ro" \
     --ipc=host \
     nanoowl-recycle-demo:latest
@@ -57,7 +58,7 @@ echo "Waiting for health check (this may take 30-40 seconds)..."
 max_attempts=40
 attempt=0
 while [ $attempt -lt $max_attempts ]; do
-    if docker exec "$CONTAINER_NAME" python3 -c "import requests; requests.get('http://localhost:7860/health')" 2>/dev/null; then
+    if docker exec "$CONTAINER_NAME" python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:7860/health')" 2>/dev/null; then
         echo "✓ Service is healthy"
         break
     fi

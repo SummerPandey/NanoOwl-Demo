@@ -32,15 +32,15 @@ newgrp docker
 ### 3. Build and Setup
 
 ```bash
-git clone https://github.com/MY_USERNAME/nanoowl-recycle-demo.git
-cd nanoowl-recycle-demo
+git clone https://github.com/SummerPandey/NanoOwl-Demo.git
+cd NanoOwl-Demo
 bash setup.sh
 ```
 
 This will:
 - Build the Docker image
 - Create persistent engine directory at `~/.nanoowl-demo/engines`
-- Pre-build TensorRT engines (5-10 minutes, one-time cost)
+- Build the TensorRT image-encoder engine (5-10 minutes, one-time per device)
 
 ### 4. Start the Demo
 
@@ -92,18 +92,19 @@ The web interface at `http://localhost:7860` shows:
 ### Duplicates & Alert Clearing
 
 - **Duplicate box suppression**: Non-maximum suppression (NMS) removes overlapping boxes from same object
-- **Alert clearing**: Red alerts automatically clear 3 seconds after object is removed from view
+- **Landfill alert**: A red banner (and optional beep) appears when a landfill item is seen and clears `alert_duration` seconds after it leaves view
+- **Detection log**: Changes in what's visible are written to `~/.nanoowl-demo/logs/detections.log`
 
 ## Offline Operation
 
-Entire model (OWL-ViT weights, TensorRT engines) is baked into the Docker image. Works offline after first start once engines are cached.
+OWL-ViT weights are cached after the first run, and the TensorRT engine lives in `~/.nanoowl-demo/engines` on the host. Works offline after that.
 
 ### Transferring to Other Jetsons
 
 On the device where image was built:
 
 ```bash
-# Export image with engines
+# Export image (rebuild the TensorRT engine on each device with setup.sh)
 docker save nanoowl-recycle-demo:latest | gzip > nanoowl-demo.tar.gz
 
 # Transfer to other Jetsons (scp, USB drive, etc)
@@ -120,7 +121,7 @@ gunzip < nanoowl-demo.tar.gz | docker load
 - CPU: <50% single core
 
 **Optimizations in place:**
-- TensorRT FP32 engine (auto-built per device)
+- TensorRT image-encoder engine (built per device by setup.sh; the app logs a warning and falls back to PyTorch if it's missing)
 - MJPEG quality: 80 (configurable)
 - Text embeddings pre-computed
 - NMS suppression enabled
@@ -192,8 +193,8 @@ Each Jetson runs independently. To deploy to 6 devices:
 bash setup.sh && bash start.sh
 
 # On other 5 Jetsons:
-git clone https://github.com/MY_USERNAME/nanoowl-recycle-demo.git
-cd nanoowl-recycle-demo
+git clone https://github.com/SummerPandey/NanoOwl-Demo.git
+cd NanoOwl-Demo
 bash setup.sh  # ~10 min per device in parallel
 bash start.sh
 ```

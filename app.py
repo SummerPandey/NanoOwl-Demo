@@ -11,7 +11,7 @@ import threading
 import time
 import json
 from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import sys
 import logging
@@ -41,17 +41,30 @@ COLORS = {
     'unknown': (128, 128, 128)
 }
 
+CONFIG_PATH = '/app/config/rules.yaml'
+ENGINE_PATH = '/app/engines/owl_image_encoder_patch32.engine'
+DETECTION_LOG = '/app/logs/detections.log'
+
 class RecycleClassifier:
-    def __init__(self, config_path='/app/config/rules.yaml'):
+    def __init__(self, config_path=CONFIG_PATH):
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Initializing NanoOWL on {device}...")
 
+        engine = None
+        if device == "cuda" and Path(ENGINE_PATH).exists():
+            engine = ENGINE_PATH
+            logger.info(f"Using TensorRT image encoder: {ENGINE_PATH}")
+        else:
+            logger.warning(f"TensorRT engine not found at {ENGINE_PATH}; "
+                           "falling back to PyTorch (slower). Run setup.sh to build it.")
+
         self.predictor = OwlPredictor(
             model_name="google/owlvit-base-patch32",
-            device=device
+            device=device,
+            image_encoder_engine=engine
         )
 
         self.build_embeddings()
@@ -117,15 +130,32 @@ class RecycleClassifier:
                             det = Detection(class_name, score_val, (x1, y1, x2, y2), category)
                             detections.append(det)
 
-            return detections
+            return self.suppress(detections)
 
         except Exception as e:
             logger.error(f"Inference error: {e}", exc_info=True)
             return []
 
+    def suppress(self, detections):
+        """Remove overlapping duplicate boxes (NMS) and cap the box count."""
+        det_cfg = self.config['detection']
+        if detections:
+            boxes = [[d.bbox[0], d.bbox[1], d.bbox[2] - d.bbox[0], d.bbox[3] - d.bbox[1]]
+                     for d in detections]
+            scores = [d.confidence for d in detections]
+            keep = cv2.dnn.NMSBoxes(boxes, scores, det_cfg['confidence_threshold'],
+                                    det_cfg.get('nms_threshold', 0.4))
+            keep = np.array(keep).flatten().tolist()
+            detections = [detections[i] for i in keep]
+        detections.sort(key=lambda d: d.confidence, reverse=True)
+        return detections[:det_cfg.get('max_detections', 10)]
+
     def draw_detections(self, frame, detections):
         output = frame.copy()
         h, w = output.shape[:2]
+        dash = self.config.get('dashboard', {})
+        if not self.config.get('alerts', {}).get('overlay_enabled', True):
+            return output
 
         for det in detections:
             x1, y1, x2, y2 = det.bbox
@@ -137,7 +167,11 @@ class RecycleClassifier:
             color = COLORS.get(det.category, COLORS['unknown'])
             cv2.rectangle(output, (x1, y1), (x2, y2), color, 2)
 
-            label = f"{det.class_name} ({det.confidence:.2f})"
+            if not dash.get('show_labels', True):
+                continue
+            label = det.class_name
+            if dash.get('show_confidence', True):
+                label += f" ({det.confidence:.2f})"
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = 0.5
             font_thickness = 1
@@ -158,6 +192,22 @@ frame_lock = threading.Lock()
 last_detections = []
 frame_count = 0
 fps_counter = 0
+last_landfill_time = 0.0
+last_logged_classes = None
+
+def log_detections(detections):
+    """Append to the detection log whenever the set of visible items changes."""
+    global last_logged_classes
+    classes = sorted(f"{d.class_name}:{d.category}" for d in detections)
+    if classes == last_logged_classes:
+        return
+    last_logged_classes = classes
+    try:
+        Path(DETECTION_LOG).parent.mkdir(parents=True, exist_ok=True)
+        with open(DETECTION_LOG, 'a') as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\t{', '.join(classes) or '(none)'}\n")
+    except OSError as e:
+        logger.warning(f"Could not write detection log: {e}")
 
 def camera_thread():
     global camera_frame, frame_count
@@ -185,9 +235,10 @@ def camera_thread():
         time.sleep(0.03)
 
 def inference_thread():
-    global camera_frame, last_detections, classifier
+    global camera_frame, last_detections, classifier, last_landfill_time
 
     classifier = RecycleClassifier()
+    log_enabled = classifier.config.get('alerts', {}).get('log_enabled', False)
 
     while True:
         with frame_lock:
@@ -199,6 +250,10 @@ def inference_thread():
         try:
             detections = classifier.classify(frame)
             last_detections = detections
+            if any(d.category == 'landfill' for d in detections):
+                last_landfill_time = time.time()
+            if log_enabled:
+                log_detections(detections)
         except Exception as e:
             logger.error(f"Inference error: {e}")
 
@@ -223,12 +278,16 @@ class RequestHandler(BaseHTTPRequestHandler):
             frame_count = 0
             last_time = time.time()
             fps = 0
+            stream_fps = 10
+            if classifier is not None:
+                stream_fps = classifier.config.get('dashboard', {}).get('fps', 10)
 
             while True:
                 with frame_lock:
-                    if camera_frame is None:
-                        continue
-                    frame = camera_frame.copy()
+                    frame = None if camera_frame is None else camera_frame.copy()
+                if frame is None or classifier is None:
+                    time.sleep(0.1)
+                    continue
 
                 output = classifier.draw_detections(frame, last_detections)
 
@@ -247,13 +306,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                 ret, buffer = cv2.imencode('.jpg', output, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 if ret:
                     frame_bytes = buffer.tobytes()
-                    self.wfile.write(b'--frame\r\n')
-                    self.wfile.write(b'Content-Type: image/jpeg\r\n')
-                    self.wfile.write(f'Content-Length: {len(frame_bytes)}\r\n\r\n'.encode())
-                    self.wfile.write(frame_bytes)
-                    self.wfile.write(b'\r\n')
+                    try:
+                        self.wfile.write(b'--frame\r\n')
+                        self.wfile.write(b'Content-Type: image/jpeg\r\n')
+                        self.wfile.write(f'Content-Length: {len(frame_bytes)}\r\n\r\n'.encode())
+                        self.wfile.write(frame_bytes)
+                        self.wfile.write(b'\r\n')
+                    except (BrokenPipeError, ConnectionResetError):
+                        break  # browser tab closed
 
-                time.sleep(0.033)
+                time.sleep(1.0 / max(1, stream_fps))
 
         elif path == '/health':
             self.send_response(200)
@@ -266,10 +328,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
+            alerts = classifier.config.get('alerts', {}) if classifier else {}
+            alert_active = (time.time() - last_landfill_time) < alerts.get('alert_duration', 3)
             data = {
                 "classifier_loaded": classifier is not None,
                 "camera_active": camera_frame is not None,
-                "detections_count": len(last_detections)
+                "detections_count": len(last_detections),
+                "landfill_alert": alert_active,
+                "sound_enabled": alerts.get('sound_enabled', False)
             }
             self.wfile.write(json.dumps(data).encode())
 
@@ -349,6 +415,16 @@ def get_html():
                 font-weight: bold;
                 color: #333;
             }
+            #alert {
+                display: none;
+                background: #d32f2f;
+                color: white;
+                text-align: center;
+                font-weight: bold;
+                padding: 12px;
+                border-radius: 8px;
+                margin-bottom: 20px;
+            }
             .legend {
                 display: flex;
                 justify-content: center;
@@ -374,6 +450,7 @@ def get_html():
     <body>
         <div class="container">
             <h1>♻️ NanoOWL Recycling Detector</h1>
+            <div id="alert">⚠️ Landfill item detected — this doesn't go in recycling</div>
             <div class="video-container">
                 <img id="video" src="/video_feed" alt="Live video stream">
             </div>
@@ -407,6 +484,22 @@ def get_html():
             </div>
         </div>
         <script>
+            let audioCtx = null;
+            let wasAlerting = false;
+            // Browsers only allow sound after the page has been clicked once
+            document.addEventListener('click', () => {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            });
+            function beep() {
+                if (!audioCtx) return;
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.frequency.value = 440;
+                gain.gain.value = 0.2;
+                osc.connect(gain).connect(audioCtx.destination);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.3);
+            }
             async function updateStats() {
                 try {
                     const res = await fetch('/api/stats');
@@ -417,6 +510,10 @@ def get_html():
                         data.camera_active ? 'Active' : 'Waiting';
                     document.getElementById('detections').textContent =
                         data.detections_count || '0';
+                    document.getElementById('alert').style.display =
+                        data.landfill_alert ? 'block' : 'none';
+                    if (data.landfill_alert && !wasAlerting && data.sound_enabled) beep();
+                    wasAlerting = data.landfill_alert;
                 } catch (e) {
                     console.error('Stats error:', e);
                 }
@@ -439,6 +536,8 @@ if __name__ == '__main__':
     t2.start()
 
     # Start HTTP server
-    server = HTTPServer(('0.0.0.0', 7860), RequestHandler)
-    logger.info("HTTP Server listening on port 7860")
+    with open(CONFIG_PATH) as f:
+        port = (yaml.safe_load(f).get('dashboard') or {}).get('port', 7860)
+    server = ThreadingHTTPServer(('0.0.0.0', port), RequestHandler)
+    logger.info(f"HTTP Server listening on port {port}")
     server.serve_forever()
