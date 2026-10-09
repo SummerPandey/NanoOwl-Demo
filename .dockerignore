@@ -1,0 +1,14 @@
+.git
+.gitignore
+.dockerignore
+.env
+.env.local
+*.log
+README.md
+MANIFEST.md
+__pycache__
+*.py[cod]
+.pytest_cache
+.vscode
+.idea
+engines/

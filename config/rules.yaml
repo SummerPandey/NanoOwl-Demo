@@ -1,0 +1,71 @@
+# NanoOWL Recycling Classifier Rules
+# Defines object detection thresholds and category mappings
+
+detection:
+  # Confidence threshold for showing detections
+  confidence_threshold: 0.5
+
+  # Duplicate box suppression (NMS)
+  nms_threshold: 0.4
+
+  # Max boxes to display per frame
+  max_detections: 10
+
+categories:
+  # Recyclable materials (GREEN)
+  recyclable:
+    - plastic bottle
+    - aluminum can
+    - glass bottle
+    - cardboard
+    - paper
+    - metal can
+    - aluminum foil
+    - newspaper
+    - magazine
+    - tin can
+    - tennis ball
+
+  # Compostable/Organic (YELLOW - optional, can be mixed)
+  compostable:
+    - apple
+    - banana
+    - orange
+    - leaf
+    - grass
+    - food waste
+
+  # Hazardous/Landfill (RED)
+  landfill:
+    - battery
+    - plastic bag
+    - styrofoam
+    - vinyl
+    - plastic film
+
+# Alert settings
+alerts:
+  # Play alert sound when non-recyclable item detected
+  sound_enabled: true
+
+  # Alert duration (seconds) - how long to show alert after object removed
+  alert_duration: 3
+
+  # Show overlay indicators
+  overlay_enabled: true
+
+  # Log detections to file
+  log_enabled: true
+
+dashboard:
+  # MJPEG stream port
+  port: 7860
+
+  # Refresh rate (FPS)
+  fps: 10
+
+  # Enable confidence scores
+  show_confidence: true
+
+  # Enable class labels
+  show_labels: true
