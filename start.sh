@@ -38,7 +38,7 @@ docker run --detach \
     --name "$CONTAINER_NAME" \
     --runtime nvidia \
     --device /dev/video0 \
-    --port 7860:7860 \
+    --network host \
     --volume "$ENGINE_DIR:/app/engines" \
     --volume "$SCRIPT_DIR/config:/app/config:ro" \
     --ipc=host \

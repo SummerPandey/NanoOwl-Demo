@@ -48,6 +48,7 @@ TEMP_CONTAINER="nanoowl-engine-builder-$$"
 docker run --rm \
     --name "$TEMP_CONTAINER" \
     --runtime nvidia \
+    --network host \
     --volume "$ENGINE_DIR:/engines" \
     --entrypoint python3 \
     "$IMAGE_TAG" \
