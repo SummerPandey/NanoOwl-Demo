@@ -1,83 +1,63 @@
 #!/usr/bin/env python3
 """
-NanoOWL Recycling Detector - FastAPI Dashboard
-Real-time object detection with classification overlay on MJPEG stream.
+NanoOWL Recycling Detector - Simple HTTP Server
+Real-time object detection with MJPEG streaming dashboard.
 """
 
 import cv2
 import numpy as np
 import torch
-import asyncio
-import logging
+import threading
 import time
 import json
 from pathlib import Path
-from datetime import datetime
-from collections import defaultdict
-from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 import sys
+import logging
 
 # Add nanoowl to path
 sys.path.insert(0, '/opt/nanoowl')
 
-from fastapi import FastAPI, Response, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
-import uvicorn
 import yaml
 from PIL import Image as PILImage
-
 from nanoowl.owl_predictor import OwlPredictor
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-@dataclass
 class Detection:
-    class_name: str
-    confidence: float
-    bbox: Tuple[float, float, float, float]  # x1, y1, x2, y2 (normalized or pixel)
-    category: str  # 'recyclable', 'compostable', 'landfill'
+    def __init__(self, class_name, confidence, bbox, category):
+        self.class_name = class_name
+        self.confidence = confidence
+        self.bbox = bbox
+        self.category = category
 
-# Color mapping for categories (BGR format for OpenCV)
 COLORS = {
-    'recyclable': (0, 255, 0),    # Green
-    'compostable': (0, 255, 255), # Yellow
-    'landfill': (0, 0, 255),      # Red
-    'unknown': (128, 128, 128)    # Gray
+    'recyclable': (0, 255, 0),
+    'compostable': (0, 255, 255),
+    'landfill': (0, 0, 255),
+    'unknown': (128, 128, 128)
 }
 
 class RecycleClassifier:
-    def __init__(self, config_path: str = '/app/config/rules.yaml'):
-        # Load config
+    def __init__(self, config_path='/app/config/rules.yaml'):
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
 
-        logger.info(f"Loading config from {config_path}")
-
-        # Initialize OWL predictor with CUDA
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Initializing NanoOWL predictor on {device}...")
+        logger.info(f"Initializing NanoOWL on {device}...")
 
         self.predictor = OwlPredictor(
             model_name="google/owlvit-base-patch32",
             device=device
         )
 
-        # Build category text embeddings
         self.build_embeddings()
-
-        # Tracking for detections
-        self.current_detections = {}
-        self.frame_count = 0
-
-        logger.info("RecycleClassifier initialized")
+        logger.info("RecycleClassifier ready")
 
     def build_embeddings(self):
-        """Pre-compute text embeddings for all categories."""
-        logger.info("Building text embeddings for categories...")
-
         all_classes = []
         self.class_to_category = {}
 
@@ -86,25 +66,20 @@ class RecycleClassifier:
                 all_classes.append(cls)
                 self.class_to_category[cls] = category
 
-        # Encode all class names to embeddings
         self.text_embeddings = self.predictor.encode_text(all_classes)
         self.all_classes = all_classes
-        logger.info(f"Built embeddings for {len(all_classes)} classes")
+        logger.info(f"Encoded {len(all_classes)} classes")
 
-    def classify(self, frame: np.ndarray) -> List[Detection]:
-        """Run inference on frame and return detections."""
+    def classify(self, frame):
         if frame is None or frame.size == 0:
             return []
 
         try:
-            # Convert BGR to RGB for PIL/transformers
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w = frame_rgb.shape[:2]
 
-            # Convert to PIL Image for OWL predictor
             pil_image = PILImage.fromarray(frame_rgb)
 
-            # Run inference with pre-computed embeddings
             predictions = self.predictor.predict(
                 image=pil_image,
                 text=self.all_classes,
@@ -114,47 +89,33 @@ class RecycleClassifier:
 
             detections = []
 
-            if predictions is not None:
-                # predictions is OwlDecodeOutput with:
-                # - boxes: tensor of shape (N, 4) with normalized coords [x1, y1, x2, y2]
-                # - scores: tensor of shape (N,)
-                # - labels: tensor of shape (N,) with class indices
-                # - input_indices: tensor of shape (N,)
-
+            if predictions is not None and predictions.boxes is not None:
                 boxes = predictions.boxes
                 scores = predictions.scores
                 labels = predictions.labels
 
-                if boxes is not None and len(boxes) > 0:
-                    for box, score, label_idx in zip(boxes, scores, labels):
-                        score_val = float(score.item()) if hasattr(score, 'item') else float(score)
-                        label_idx_val = int(label_idx.item()) if hasattr(label_idx, 'item') else int(label_idx)
+                for box, score, label_idx in zip(boxes, scores, labels):
+                    score_val = float(score.item() if hasattr(score, 'item') else score)
+                    label_idx_val = int(label_idx.item() if hasattr(label_idx, 'item') else label_idx)
 
-                        if score_val >= self.config['detection']['confidence_threshold']:
-                            if 0 <= label_idx_val < len(self.all_classes):
-                                class_name = self.all_classes[label_idx_val]
-                                category = self.class_to_category.get(class_name, 'unknown')
+                    if score_val >= self.config['detection']['confidence_threshold']:
+                        if 0 <= label_idx_val < len(self.all_classes):
+                            class_name = self.all_classes[label_idx_val]
+                            category = self.class_to_category.get(class_name, 'unknown')
 
-                                # Convert normalized coords to pixel coords
-                                x1, y1, x2, y2 = box
-                                x1 = float(x1.item() if hasattr(x1, 'item') else x1)
-                                y1 = float(y1.item() if hasattr(y1, 'item') else y1)
-                                x2 = float(x2.item() if hasattr(x2, 'item') else x2)
-                                y2 = float(y2.item() if hasattr(y2, 'item') else y2)
+                            x1, y1, x2, y2 = box
+                            x1 = float(x1.item() if hasattr(x1, 'item') else x1)
+                            y1 = float(y1.item() if hasattr(y1, 'item') else y1)
+                            x2 = float(x2.item() if hasattr(x2, 'item') else x2)
+                            y2 = float(y2.item() if hasattr(y2, 'item') else y2)
 
-                                # Normalize if needed (OWL outputs normalized coords)
-                                if x2 <= 1.0 and y2 <= 1.0:
-                                    x1, y1, x2, y2 = int(x1*w), int(y1*h), int(x2*w), int(y2*h)
-                                else:
-                                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                            if x2 <= 1.0 and y2 <= 1.0:
+                                x1, y1, x2, y2 = int(x1*w), int(y1*h), int(x2*w), int(y2*h)
+                            else:
+                                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
 
-                                det = Detection(
-                                    class_name=class_name,
-                                    confidence=score_val,
-                                    bbox=(x1, y1, x2, y2),
-                                    category=category
-                                )
-                                detections.append(det)
+                            det = Detection(class_name, score_val, (x1, y1, x2, y2), category)
+                            detections.append(det)
 
             return detections
 
@@ -162,252 +123,164 @@ class RecycleClassifier:
             logger.error(f"Inference error: {e}", exc_info=True)
             return []
 
-    def draw_detections(self, frame: np.ndarray, detections: List[Detection]) -> np.ndarray:
-        """Draw bounding boxes and labels on frame."""
+    def draw_detections(self, frame, detections):
         output = frame.copy()
+        h, w = output.shape[:2]
 
         for det in detections:
             x1, y1, x2, y2 = det.bbox
-            color = COLORS.get(det.category, COLORS['unknown'])
-
-            # Clamp coordinates
-            h, w = output.shape[:2]
             x1 = max(0, min(x1, w-1))
             y1 = max(0, min(y1, h-1))
             x2 = max(0, min(x2, w-1))
             y2 = max(0, min(y2, h-1))
 
-            # Draw box
+            color = COLORS.get(det.category, COLORS['unknown'])
             cv2.rectangle(output, (x1, y1), (x2, y2), color, 2)
 
-            # Draw label with background
             label = f"{det.class_name} ({det.confidence:.2f})"
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = 0.5
             font_thickness = 1
-
             text_size = cv2.getTextSize(label, font, font_scale, font_thickness)[0]
             text_x, text_y = x1, max(20, y1 - 5)
 
-            # Background rectangle
-            cv2.rectangle(
-                output,
-                (text_x, text_y - text_size[1] - 4),
-                (text_x + text_size[0] + 4, text_y + 2),
-                color,
-                -1
-            )
-
-            # Text
-            cv2.putText(
-                output,
-                label,
-                (text_x + 2, text_y - 2),
-                font,
-                font_scale,
-                (255, 255, 255),
-                font_thickness
-            )
+            cv2.rectangle(output, (text_x, text_y - text_size[1] - 4),
+                         (text_x + text_size[0] + 4, text_y + 2), color, -1)
+            cv2.putText(output, label, (text_x + 2, text_y - 2), font,
+                       font_scale, (255, 255, 255), font_thickness)
 
         return output
 
 # Global state
-app = FastAPI(title="NanoOWL Recycling Detector")
 classifier = None
 camera_frame = None
-camera_lock = asyncio.Lock()
-frame_time = time.time()
-last_detections: List[Detection] = []
+frame_lock = threading.Lock()
+last_detections = []
+frame_count = 0
+fps_counter = 0
 
-def init_classifier():
-    global classifier
-    if classifier is None:
-        classifier = RecycleClassifier()
-
-async def read_frames():
-    """Continuously read frames from camera."""
-    global camera_frame, frame_time
+def camera_thread():
+    global camera_frame, frame_count
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        logger.error("Failed to open camera at /dev/video0")
+        logger.error("Failed to open camera")
         return
 
-    # Set camera properties
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, 30)
 
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    logger.info(f"Camera opened: {w}x{h} @ {fps} FPS")
+    logger.info(f"Camera: {w}x{h}")
 
     while True:
         ret, frame = cap.read()
-        if not ret:
-            logger.warning("Failed to read frame from camera")
-            await asyncio.sleep(0.1)
-            continue
+        if ret:
+            with frame_lock:
+                camera_frame = frame
+                frame_count += 1
 
-        async with camera_lock:
-            camera_frame = frame.copy()
-            frame_time = time.time()
+        time.sleep(0.03)
 
-        await asyncio.sleep(0.033)  # ~30 FPS read rate
+def inference_thread():
+    global camera_frame, last_detections, classifier
 
-async def inference_loop():
-    """Run continuous inference on camera frames."""
-    global camera_frame, last_detections
-
-    init_classifier()
-    logger.info("Inference loop started")
-
-    frame_count = 0
-    last_log_time = time.time()
+    classifier = RecycleClassifier()
 
     while True:
-        async with camera_lock:
+        with frame_lock:
             if camera_frame is None:
-                await asyncio.sleep(0.1)
+                time.sleep(0.1)
                 continue
-
             frame = camera_frame.copy()
 
         try:
-            start = time.time()
             detections = classifier.classify(frame)
-            latency = (time.time() - start) * 1000
-
             last_detections = detections
-            frame_count += 1
-
-            # Log periodically
-            now = time.time()
-            if now - last_log_time >= 5.0:
-                if detections:
-                    classes = [d.class_name for d in detections]
-                    logger.info(f"Detected ({frame_count}): {classes} (latency: {latency:.1f}ms)")
-                frame_count = 0
-                last_log_time = now
-
         except Exception as e:
-            logger.error(f"Inference error: {e}", exc_info=True)
+            logger.error(f"Inference error: {e}")
 
-        await asyncio.sleep(0.05)  # ~20 FPS inference
+        time.sleep(0.05)
 
-async def mjpeg_generator():
-    """Generate MJPEG stream with annotations."""
-    global camera_frame, last_detections
+class RequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
 
-    init_classifier()
+        if path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(get_html().encode())
 
-    frame_count = 0
-    last_time = time.time()
-    fps_display = 0
+        elif path == '/video_feed':
+            self.send_response(200)
+            self.send_header('Content-type', 'multipart/x-mixed-replace; boundary=frame')
+            self.end_headers()
 
-    while True:
-        async with camera_lock:
-            if camera_frame is None:
-                await asyncio.sleep(0.033)
-                continue
+            frame_count = 0
+            last_time = time.time()
+            fps = 0
 
-            frame = camera_frame.copy()
+            while True:
+                with frame_lock:
+                    if camera_frame is None:
+                        continue
+                    frame = camera_frame.copy()
 
-        try:
-            # Draw last detections on frame
-            output = classifier.draw_detections(frame, last_detections)
+                output = classifier.draw_detections(frame, last_detections)
 
-            # Add FPS counter
-            frame_count += 1
-            now = time.time()
-            if now - last_time >= 1.0:
-                fps_display = frame_count / (now - last_time)
-                frame_count = 0
-                last_time = now
+                frame_count += 1
+                now = time.time()
+                if now - last_time >= 1.0:
+                    fps = frame_count / (now - last_time)
+                    frame_count = 0
+                    last_time = now
 
-            cv2.putText(
-                output,
-                f"FPS: {fps_display:.1f}",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 255, 0),
-                2
-            )
+                cv2.putText(output, f"FPS: {fps:.1f}", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(output, f"Detections: {len(last_detections)}", (10, 60),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-            # Detection count
-            cv2.putText(
-                output,
-                f"Detections: {len(last_detections)}",
-                (10, 60),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 255, 0),
-                2
-            )
+                ret, buffer = cv2.imencode('.jpg', output, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                if ret:
+                    frame_bytes = buffer.tobytes()
+                    self.wfile.write(b'--frame\r\n')
+                    self.wfile.write(b'Content-Type: image/jpeg\r\n')
+                    self.wfile.write(f'Content-Length: {len(frame_bytes)}\r\n\r\n'.encode())
+                    self.wfile.write(frame_bytes)
+                    self.wfile.write(b'\r\n')
 
-            # MJPEG encoding
-            ret, buffer = cv2.imencode('.jpg', output, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            if not ret:
-                await asyncio.sleep(0.033)
-                continue
+                time.sleep(0.033)
 
-            frame_bytes = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n'
-                   b'Content-Length: ' + str(len(frame_bytes)).encode() + b'\r\n\r\n' +
-                   frame_bytes + b'\r\n')
+        elif path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            data = {"status": "ok", "classifier_loaded": classifier is not None}
+            self.wfile.write(json.dumps(data).encode())
 
-            await asyncio.sleep(0.033)  # ~30 FPS MJPEG
+        elif path == '/api/stats':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            data = {
+                "classifier_loaded": classifier is not None,
+                "camera_active": camera_frame is not None,
+                "detections_count": len(last_detections)
+            }
+            self.wfile.write(json.dumps(data).encode())
 
-        except Exception as e:
-            logger.error(f"MJPEG generation error: {e}", exc_info=True)
-            await asyncio.sleep(0.1)
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-@app.on_event("startup")
-async def startup():
-    """Initialize on startup."""
-    logger.info("=" * 60)
-    logger.info("Starting NanoOWL Recycling Detector")
-    logger.info("=" * 60)
+    def log_message(self, format, *args):
+        pass
 
-    # Start camera reader task
-    asyncio.create_task(read_frames())
-
-    # Start inference task
-    asyncio.create_task(inference_loop())
-
-@app.get("/")
-async def root():
-    """Serve HTML dashboard."""
-    return HTMLResponse(html_dashboard())
-
-@app.get("/video_feed")
-async def video_feed():
-    """Stream MJPEG video."""
-    return StreamingResponse(
-        mjpeg_generator(),
-        media_type="multipart/x-mixed-replace; boundary=frame"
-    )
-
-@app.get("/health")
-async def health():
-    """Health check."""
-    return {"status": "ok", "timestamp": datetime.now().isoformat()}
-
-@app.get("/api/stats")
-async def stats():
-    """Return detection statistics."""
-    return {
-        "classifier_loaded": classifier is not None,
-        "camera_active": camera_frame is not None,
-        "detections_count": len(last_detections),
-        "timestamp": datetime.now().isoformat()
-    }
-
-def html_dashboard():
-    """Generate HTML dashboard."""
+def get_html():
     return """
     <!DOCTYPE html>
     <html>
@@ -554,5 +427,18 @@ def html_dashboard():
     </html>
     """
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=7860, log_level="info")
+if __name__ == '__main__':
+    logger.info("=" * 60)
+    logger.info("NanoOWL Recycling Detector - Starting")
+    logger.info("=" * 60)
+
+    # Start threads
+    t1 = threading.Thread(target=camera_thread, daemon=True)
+    t2 = threading.Thread(target=inference_thread, daemon=True)
+    t1.start()
+    t2.start()
+
+    # Start HTTP server
+    server = HTTPServer(('0.0.0.0', 7860), RequestHandler)
+    logger.info("HTTP Server listening on port 7860")
+    server.serve_forever()
