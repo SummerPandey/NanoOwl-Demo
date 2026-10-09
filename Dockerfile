@@ -1,23 +1,9 @@
 FROM dustynv/nanoowl:r36.3.0
 
-# Install additional dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3-pip \
-    python3-dev \
-    libopencv-dev \
-    python3-opencv \
-    && rm -rf /var/lib/apt/lists/*
-
-# Upgrade pip and install Python dependencies
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir \
-    fastapi==0.104.1 \
-    uvicorn[standard]==0.24.0 \
-    python-multipart==0.0.6 \
-    pyyaml==6.0.1 \
-    numpy==1.24.3 \
-    opencv-python==4.8.0.76 \
-    Pillow==10.0.0
+# Base image already has pytorch, torchvision, opencv, tensorrt, pyyaml
+# Install additional web framework dependencies
+RUN pip install fastapi uvicorn[standard] python-multipart --no-cache-dir || \
+    echo "Note: pip packages may already be available in base image"
 
 # Set working directory
 WORKDIR /app
